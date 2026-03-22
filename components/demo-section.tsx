@@ -12,7 +12,7 @@ export default function DemoSection() {
           <p>첫 번째 기능에 대한 설명입니다.</p>
         </div>
         <div className="card">
-          <h3>기능 B</h3>
+          <h3>기능 두번째</h3>
           <p>두 번째 기능에 대한 설명입니다.</p>
         </div>
         <div className="card">
