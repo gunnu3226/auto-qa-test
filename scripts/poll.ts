@@ -188,13 +188,34 @@ function processIssue(issue: GitHubIssue) {
 제목: ${issue.title}
 상세: ${issue.body ?? "없음"}
 
-수정 후 빌드가 깨지지 않는지 확인해주세요.`;
+수정 후 빌드가 깨지지 않는지 확인해주세요.
+
+작업이 끝나면 마지막에 반드시 아래 형식으로 요약을 출력해주세요:
+---SUMMARY---
+## 분석
+(QA 요청을 어떻게 이해했는지)
+
+## 수정 계획
+(어떤 파일을 왜 수정했는지)
+
+## 변경 내용
+(구체적으로 무엇을 바꿨는지)
+---END---`;
 
   try {
-    run(
+    const claudeOutput = run(
       `claude -p ${JSON.stringify(prompt)} --allowedTools Edit,Write,Read,Bash,Glob,Grep`,
     );
     log("Claude Code 실행 완료");
+
+    // Claude 응답에서 요약 추출
+    let summary = "";
+    const summaryMatch = claudeOutput.match(/---SUMMARY---([\s\S]*?)---END---/);
+    if (summaryMatch) {
+      summary = summaryMatch[1].trim();
+    } else {
+      summary = "Claude가 코드를 수정했습니다. (상세 요약 없음)";
+    }
 
     // 4. 빌드 검증
     try {
@@ -237,6 +258,10 @@ function processIssue(issue: GitHubIssue) {
         ``,
         `---`,
         ``,
+        summary,
+        ``,
+        `---`,
+        ``,
         `Claude Code가 자동으로 생성한 PR입니다.`,
         `close #${issue.number}`,
       ].join("\n"),
@@ -245,7 +270,13 @@ function processIssue(issue: GitHubIssue) {
     removeLabel(issue.number, "in-progress");
     addComment(
       issue.number,
-      `PR이 생성되었습니다: ${pr.html_url}\n\nreview 후 merge하면 자동 배포됩니다.`,
+      [
+        `PR이 생성되었습니다: ${pr.html_url}`,
+        ``,
+        summary,
+        ``,
+        `review 후 merge하면 자동 배포됩니다.`,
+      ].join("\n"),
     );
 
     // main으로 복귀
