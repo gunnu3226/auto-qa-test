@@ -1,9 +1,22 @@
 import { execSync } from "child_process";
+import fs from "fs";
 import path from "path";
-import dotenv from "dotenv";
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-dotenv.config({ path: path.join(PROJECT_ROOT, ".env.local") });
+
+// .env.local 수동 로드
+const envPath = path.join(PROJECT_ROOT, ".env.local");
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex === -1) continue;
+    const key = trimmed.slice(0, eqIndex);
+    const value = trimmed.slice(eqIndex + 1);
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
 
 const POLL_INTERVAL = 10000; // 10초
 
