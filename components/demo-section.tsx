@@ -8,7 +8,7 @@ export default function DemoSection() {
 
       <div className="card-grid">
         <div className="card">
-          <h3>기능 A</h3>
+          <h3>기능 (가)</h3>
           <p>첫 번째 기능에 대한 설명입니다.</p>
         </div>
         <div className="card">

@@ -21,6 +21,9 @@ const headers = {
   "Content-Type": "application/json",
 };
 
+// 처리 중이거나 처리 완료한 이슈 번호를 로컬에서 추적
+const processedIssues = new Set<number>();
+
 function log(message: string) {
   const time = new Date().toLocaleTimeString("ko-KR");
   console.log(`[${time}] ${message}`);
@@ -51,9 +54,11 @@ async function githubApi(
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    throw new Error(`GitHub API 에러: ${res.status} ${await res.text()}`);
+    const errorBody = await res.text();
+    throw new Error(`GitHub API 에러: ${res.status} ${errorBody}`);
   }
-  return method === "DELETE" ? null : res.json();
+  if (method === "DELETE") return null;
+  return res.json();
 }
 
 interface GitHubIssue {
@@ -66,12 +71,18 @@ interface GitHubIssue {
 async function getPendingIssues(): Promise<GitHubIssue[]> {
   const issues = await githubApi("/issues?labels=qa&state=open&sort=created&direction=asc&per_page=10");
   return issues.filter(
-    (issue: GitHubIssue) => !issue.labels.some((l) => l.name === "in-progress"),
+    (issue: GitHubIssue) =>
+      !issue.labels.some((l) => l.name === "in-progress" || l.name === "done" || l.name === "failed") &&
+      !processedIssues.has(issue.number),
   );
 }
 
 async function addLabel(issueNumber: number, label: string) {
-  await githubApi(`/issues/${issueNumber}/labels`, "POST", { labels: [label] });
+  try {
+    await githubApi(`/issues/${issueNumber}/labels`, "POST", { labels: [label] });
+  } catch (e) {
+    log(`라벨 추가 실패 (${label}): ${e}`);
+  }
 }
 
 async function removeLabel(issueNumber: number, label: string) {
@@ -86,7 +97,11 @@ async function removeLabel(issueNumber: number, label: string) {
 }
 
 async function addComment(issueNumber: number, comment: string) {
-  await githubApi(`/issues/${issueNumber}/comments`, "POST", { body: comment });
+  try {
+    await githubApi(`/issues/${issueNumber}/comments`, "POST", { body: comment });
+  } catch (e) {
+    log(`코멘트 추가 실패: ${e}`);
+  }
 }
 
 async function createPullRequest(
@@ -94,30 +109,40 @@ async function createPullRequest(
   title: string,
   body: string,
 ): Promise<{ html_url: string; number: number }> {
-  return githubApi("/pulls", "POST", {
+  log(`PR 생성 중... head: ${branchName}, base: main`);
+  const result = await githubApi("/pulls", "POST", {
     title,
     body,
     head: branchName,
     base: "main",
   });
+  log(`PR 생성 완료: ${result.html_url}`);
+  return result;
 }
 
 async function processIssue(issue: GitHubIssue) {
   const branchName = `qa/issue-${issue.number}`;
   log(`=== QA 처리 시작: #${issue.number} ${issue.title} ===`);
 
+  // 즉시 로컬 추적에 추가 (중복 처리 방지)
+  processedIssues.add(issue.number);
+
   // 1. in-progress 라벨 추가
   await addLabel(issue.number, "in-progress");
 
-  // 2. 새 브랜치 생성
+  // 2. main에서 새 브랜치 생성
+  run("git checkout main");
   try {
-    run(`git checkout -b ${branchName}`);
-  } catch {
-    // 브랜치가 이미 있으면 삭제 후 재생성
-    run("git checkout main");
     run(`git branch -D ${branchName}`);
-    run(`git checkout -b ${branchName}`);
+  } catch {
+    // 브랜치가 없으면 무시
   }
+  try {
+    run(`git push origin --delete ${branchName}`);
+  } catch {
+    // 원격 브랜치가 없으면 무시
+  }
+  run(`git checkout -b ${branchName}`);
 
   // 3. Claude Code CLI 실행
   const prompt = `다음 QA 요청을 처리해주세요. 이 프로젝트의 CLAUDE.md를 먼저 읽고 수정 가능한 파일만 수정하세요.
@@ -142,7 +167,6 @@ async function processIssue(issue: GitHubIssue) {
       log("빌드 실패 - 변경 롤백");
       run("git checkout -- .");
       run("git checkout main");
-      run(`git branch -D ${branchName}`);
       await removeLabel(issue.number, "in-progress");
       await addLabel(issue.number, "failed");
       await addComment(issue.number, "빌드 실패로 변경사항이 롤백되었습니다.");
@@ -156,19 +180,29 @@ async function processIssue(issue: GitHubIssue) {
     } catch {
       log("변경사항 없음");
       run("git checkout main");
-      run(`git branch -D ${branchName}`);
       await removeLabel(issue.number, "in-progress");
       await addComment(issue.number, "Claude가 분석했지만 코드 변경이 필요하지 않았습니다.");
       return;
     }
 
     run(`git push origin ${branchName}`);
+    log("브랜치 push 완료");
 
     // 6. PR 생성
     const pr = await createPullRequest(
       branchName,
       `fix: QA #${issue.number} ${issue.title}`,
-      `## QA 요청 (Issue #${issue.number})\n\n**제목**: ${issue.title}\n**상세**: ${issue.body ?? "없음"}\n\n---\n\nClaude Code가 자동으로 생성한 PR입니다.\nclose #${issue.number}`,
+      [
+        `## QA 요청 (Issue #${issue.number})`,
+        ``,
+        `**제목**: ${issue.title}`,
+        `**상세**: ${issue.body ?? "없음"}`,
+        ``,
+        `---`,
+        ``,
+        `Claude Code가 자동으로 생성한 PR입니다.`,
+        `close #${issue.number}`,
+      ].join("\n"),
     );
 
     await removeLabel(issue.number, "in-progress");
@@ -187,7 +221,6 @@ async function processIssue(issue: GitHubIssue) {
     try {
       run("git checkout -- .");
       run("git checkout main");
-      run(`git branch -D ${branchName}`);
     } catch {
       // 무시
     }
