@@ -1,7 +1,10 @@
 import { execSync } from "child_process";
 import path from "path";
+import dotenv from "dotenv";
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
+dotenv.config({ path: path.join(PROJECT_ROOT, ".env.local") });
+
 const POLL_INTERVAL = 10000; // 10초
 
 // 환경변수
@@ -35,6 +38,11 @@ function run(cmd: string): string {
 }
 
 function gitSync() {
+  try {
+    run("git stash --include-untracked");
+  } catch {
+    // stash할 게 없으면 무시
+  }
   try {
     run("git checkout main");
     run("git pull origin main --rebase");
