@@ -64,22 +64,41 @@ function gitSync() {
   }
 }
 
-async function githubApi(
+function githubApi(
   endpoint: string,
   method: string = "GET",
   body?: object,
-) {
-  const res = await fetch(`${API_BASE}${endpoint}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const errorBody = await res.text();
-    throw new Error(`GitHub API 에러: ${res.status} ${errorBody}`);
+): any {
+  const url = `${API_BASE}${endpoint}`;
+  const args = [
+    "curl", "-s", "-X", method,
+    "-H", `Authorization: Bearer ${GITHUB_TOKEN}`,
+    "-H", "Accept: application/vnd.github+json",
+    "-H", "Content-Type: application/json",
+  ];
+  if (body) {
+    args.push("-d", JSON.stringify(body));
   }
+  args.push(url);
+
+  const result = execSync(args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" "), {
+    encoding: "utf-8",
+    timeout: 30000,
+  });
+
   if (method === "DELETE") return null;
-  return res.json();
+  try {
+    const parsed = JSON.parse(result);
+    if (parsed.message) {
+      throw new Error(`GitHub API 에러: ${parsed.message}`);
+    }
+    return parsed;
+  } catch (e) {
+    if (e instanceof SyntaxError) {
+      throw new Error(`GitHub API 응답 파싱 실패: ${result.slice(0, 200)}`);
+    }
+    throw e;
+  }
 }
 
 interface GitHubIssue {
@@ -89,8 +108,8 @@ interface GitHubIssue {
   labels: { name: string }[];
 }
 
-async function getPendingIssues(): Promise<GitHubIssue[]> {
-  const issues = await githubApi("/issues?labels=qa&state=open&sort=created&direction=asc&per_page=10");
+function getPendingIssues(): GitHubIssue[] {
+  const issues = githubApi("/issues?labels=qa&state=open&sort=created&direction=asc&per_page=10");
   return issues.filter(
     (issue: GitHubIssue) =>
       !issue.labels.some((l) => l.name === "in-progress" || l.name === "done" || l.name === "failed") &&
@@ -98,40 +117,37 @@ async function getPendingIssues(): Promise<GitHubIssue[]> {
   );
 }
 
-async function addLabel(issueNumber: number, label: string) {
+function addLabel(issueNumber: number, label: string) {
   try {
-    await githubApi(`/issues/${issueNumber}/labels`, "POST", { labels: [label] });
+    githubApi(`/issues/${issueNumber}/labels`, "POST", { labels: [label] });
   } catch (e) {
     log(`라벨 추가 실패 (${label}): ${e}`);
   }
 }
 
-async function removeLabel(issueNumber: number, label: string) {
+function removeLabel(issueNumber: number, label: string) {
   try {
-    await fetch(`${API_BASE}/issues/${issueNumber}/labels/${label}`, {
-      method: "DELETE",
-      headers,
-    });
+    githubApi(`/issues/${issueNumber}/labels/${label}`, "DELETE");
   } catch {
     // 라벨이 없으면 무시
   }
 }
 
-async function addComment(issueNumber: number, comment: string) {
+function addComment(issueNumber: number, comment: string) {
   try {
-    await githubApi(`/issues/${issueNumber}/comments`, "POST", { body: comment });
+    githubApi(`/issues/${issueNumber}/comments`, "POST", { body: comment });
   } catch (e) {
     log(`코멘트 추가 실패: ${e}`);
   }
 }
 
-async function createPullRequest(
+function createPullRequest(
   branchName: string,
   title: string,
   body: string,
-): Promise<{ html_url: string; number: number }> {
+): { html_url: string; number: number } {
   log(`PR 생성 중... head: ${branchName}, base: main`);
-  const result = await githubApi("/pulls", "POST", {
+  const result = githubApi("/pulls", "POST", {
     title,
     body,
     head: branchName,
@@ -141,7 +157,7 @@ async function createPullRequest(
   return result;
 }
 
-async function processIssue(issue: GitHubIssue) {
+function processIssue(issue: GitHubIssue) {
   const branchName = `qa/issue-${issue.number}`;
   log(`=== QA 처리 시작: #${issue.number} ${issue.title} ===`);
 
@@ -149,7 +165,7 @@ async function processIssue(issue: GitHubIssue) {
   processedIssues.add(issue.number);
 
   // 1. in-progress 라벨 추가
-  await addLabel(issue.number, "in-progress");
+  addLabel(issue.number, "in-progress");
 
   // 2. main에서 새 브랜치 생성
   run("git checkout main");
@@ -188,9 +204,9 @@ async function processIssue(issue: GitHubIssue) {
       log("빌드 실패 - 변경 롤백");
       run("git checkout -- .");
       run("git checkout main");
-      await removeLabel(issue.number, "in-progress");
-      await addLabel(issue.number, "failed");
-      await addComment(issue.number, "빌드 실패로 변경사항이 롤백되었습니다.");
+      removeLabel(issue.number, "in-progress");
+      addLabel(issue.number, "failed");
+      addComment(issue.number, "빌드 실패로 변경사항이 롤백되었습니다.");
       return;
     }
 
@@ -201,8 +217,8 @@ async function processIssue(issue: GitHubIssue) {
     } catch {
       log("변경사항 없음");
       run("git checkout main");
-      await removeLabel(issue.number, "in-progress");
-      await addComment(issue.number, "Claude가 분석했지만 코드 변경이 필요하지 않았습니다.");
+      removeLabel(issue.number, "in-progress");
+      addComment(issue.number, "Claude가 분석했지만 코드 변경이 필요하지 않았습니다.");
       return;
     }
 
@@ -210,7 +226,7 @@ async function processIssue(issue: GitHubIssue) {
     log("브랜치 push 완료");
 
     // 6. PR 생성
-    const pr = await createPullRequest(
+    const pr = createPullRequest(
       branchName,
       `fix: QA #${issue.number} ${issue.title}`,
       [
@@ -226,8 +242,8 @@ async function processIssue(issue: GitHubIssue) {
       ].join("\n"),
     );
 
-    await removeLabel(issue.number, "in-progress");
-    await addComment(
+    removeLabel(issue.number, "in-progress");
+    addComment(
       issue.number,
       `PR이 생성되었습니다: ${pr.html_url}\n\nreview 후 merge하면 자동 배포됩니다.`,
     );
@@ -245,16 +261,20 @@ async function processIssue(issue: GitHubIssue) {
     } catch {
       // 무시
     }
-    await removeLabel(issue.number, "in-progress");
-    await addLabel(issue.number, "failed");
-    await addComment(
+    removeLabel(issue.number, "in-progress");
+    addLabel(issue.number, "failed");
+    addComment(
       issue.number,
       `처리 실패: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
 
-async function poll() {
+function sleep(ms: number) {
+  execSync(`sleep ${ms / 1000}`);
+}
+
+function poll() {
   log("Polling 시작... (Ctrl+C로 종료)");
   log(`대상 repo: ${GITHUB_REPO}`);
 
@@ -262,17 +282,17 @@ async function poll() {
     try {
       gitSync();
 
-      const pending = await getPendingIssues();
+      const pending = getPendingIssues();
 
       if (pending.length > 0) {
         log(`대기 중인 QA 요청 ${pending.length}건 발견`);
-        await processIssue(pending[0]);
+        processIssue(pending[0]);
       }
     } catch (error) {
       log(`Polling 에러: ${error}`);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+    sleep(POLL_INTERVAL);
   }
 }
 
